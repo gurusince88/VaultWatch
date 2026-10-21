@@ -43,8 +43,8 @@ VaultWatch runs `ob sync --path <vault> --continuous` for each of your vaults, k
 ## Install
 
 ```bash
-git clone https://github.com/gurusince88/vaultwatch.git
-cd vaultwatch
+git clone https://github.com/gurusince88/VaultWatch.git
+cd VaultWatch
 ./build.sh --install
 open /Applications/VaultWatch.app
 ```

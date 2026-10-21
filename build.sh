@@ -1,6 +1,17 @@
 #!/bin/bash
 # Builds VaultWatch.app (menu bar app, no Dock icon) from the Swift package.
-# Usage: ./build.sh [--install]
+#
+# Usage:
+#   ./build.sh              build to build/VaultWatch.app
+#   ./build.sh --install    build, then install to /Applications
+#
+# Optional environment (used by CI):
+#   UNIVERSAL=1             build for Apple silicon + Intel
+#   SIGN_IDENTITY="Developer ID Application: Name (TEAMID)"
+#                           sign with hardened runtime + timestamp (default: ad-hoc "-")
+#   VERSION=0.3.0           sets CFBundleShortVersionString
+#   BUILD_NUMBER=42         sets CFBundleVersion
+#
 # The FIRST build takes 1-3 minutes. Don't interrupt it at "Write swift-version".
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -12,11 +23,19 @@ if xcrun --find swift >/dev/null 2>&1; then
 else
     SWIFT=(swift)
 fi
+
+ARCH_FLAGS=()
+if [[ "${UNIVERSAL:-0}" == "1" ]]; then
+    ARCH_FLAGS=(--arch arm64 --arch x86_64)
+fi
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+
 echo "Using: $("${SWIFT[@]}" --version 2>&1 | head -1)"
 echo "Building (first build takes 1-3 minutes)..."
 
-"${SWIFT[@]}" build -c release
-BIN="$("${SWIFT[@]}" build -c release --show-bin-path)/VaultWatch"
+# ${ARCH_FLAGS[@]+...} keeps bash 3.2 (macOS default) happy with an empty array under set -u.
+"${SWIFT[@]}" build -c release ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}
+BIN="$("${SWIFT[@]}" build -c release ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --show-bin-path)/VaultWatch"
 
 APP="build/VaultWatch.app"
 rm -rf "$APP"
@@ -25,10 +44,25 @@ cp "$BIN" "$APP/Contents/MacOS/VaultWatch"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-# Ad-hoc sign so macOS lets the login item and notifications work locally.
-codesign --force --deep --sign - "$APP"
+PLIST="$APP/Contents/Info.plist"
+if [[ -n "${VERSION:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
+fi
+if [[ -n "${BUILD_NUMBER:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$PLIST"
+fi
 
-echo "Built $APP"
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+    # Ad-hoc: fine for building on your own Mac.
+    codesign --force --sign - "$APP"
+else
+    # Developer ID: hardened runtime + secure timestamp, required for notarization.
+    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+fi
+codesign --verify --strict --verbose=1 "$APP"
+
+echo "Built $APP ($(lipo -archs "$APP/Contents/MacOS/VaultWatch"))"
+
 if [[ "${1:-}" == "--install" ]]; then
     osascript -e 'tell application "VaultWatch" to quit' >/dev/null 2>&1 || true
 
@@ -44,7 +78,6 @@ if [[ "${1:-}" == "--install" ]]; then
     sleep 1
     rm -rf /Applications/VaultWatch.app
     cp -R "$APP" /Applications/VaultWatch.app
-    # Refresh Finder/Dock icon cache for the new bundle.
-    touch /Applications/VaultWatch.app
+    touch /Applications/VaultWatch.app   # refresh Finder's icon cache
     echo "Installed to /Applications/VaultWatch.app"
 fi

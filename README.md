@@ -5,6 +5,11 @@
 <h1 align="center">VaultWatch</h1>
 
 <p align="center">
+  <a href="https://github.com/gurusince88/VaultWatch/releases/latest"><img src="https://img.shields.io/github/v/release/gurusince88/VaultWatch" alt="Latest release"></a>
+  <a href="https://github.com/gurusince88/VaultWatch/actions/workflows/build.yml"><img src="https://github.com/gurusince88/VaultWatch/actions/workflows/build.yml/badge.svg" alt="Build"></a>
+</p>
+
+<p align="center">
   A small macOS menu bar app that keeps <a href="https://help.obsidian.md/headless">Obsidian Headless Sync</a> running in the background, and shows you what it's syncing.
 </p>
 
@@ -42,6 +47,18 @@ VaultWatch runs `ob sync --path <vault> --continuous` for each of your vaults, k
 
 ## Install
 
+### Download (recommended)
+
+1. Grab `VaultWatch-x.y.z.zip` from the [latest release](https://github.com/gurusince88/VaultWatch/releases/latest) and unzip it.
+2. Drag **VaultWatch.app** to **Applications** and open it.
+3. Open the menu bar item, click the gear, and turn on **Launch at Login**.
+
+If macOS says it can't verify the app (builds that aren't notarized yet), open **System Settings → Privacy & Security** and click **Open Anyway**.
+
+If you're already running `ob sync --continuous` in a Terminal, stop it first (Ctrl-C) or click **Take Over** in the menu.
+
+### Build from source
+
 ```bash
 git clone https://github.com/gurusince88/VaultWatch.git
 cd VaultWatch
@@ -49,9 +66,21 @@ cd VaultWatch
 open /Applications/VaultWatch.app
 ```
 
-The first build takes 1–3 minutes. Then open the menu bar item, click the gear, and turn on **Launch at Login**.
+The first build takes 1–3 minutes.
 
-If you're already running `ob sync --continuous` in a Terminal, stop it first (Ctrl-C) or click **Take Over** in the menu.
+### Releasing
+
+Push a tag like `v0.4.0` and the [Build & Release workflow](.github/workflows/build.yml) builds a universal app and publishes it. Release notes come from `docs/releases/<tag>.md`. With these repository secrets set, the app is also signed with your Developer ID and notarized:
+
+| Secret | Value |
+|---|---|
+| `MACOS_CERTIFICATE` | Base64 of your **Developer ID Application** certificate exported as `.p12` |
+| `MACOS_CERTIFICATE_PWD` | Password you set when exporting the `.p12` |
+| `NOTARY_KEY` | App Store Connect API key (`.p8` contents, raw or base64) |
+| `NOTARY_KEY_ID` | That key's Key ID |
+| `NOTARY_ISSUER_ID` | Your App Store Connect Issuer ID |
+
+Instead of the API key you can use `APPLE_ID`, `APPLE_APP_PASSWORD` (an app-specific password), and `APPLE_TEAM_ID`.
 
 ## Test
 

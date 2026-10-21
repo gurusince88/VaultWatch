@@ -1,0 +1,194 @@
+name: Build & Release
+
+# - Every push / PR to main: build check on macOS.
+# - Push a tag like v0.3.0: build a universal app, sign + notarize it if the
+#   signing secrets are set, and publish it as a GitHub Release.
+# - Run manually (Actions > Build & Release > Run workflow) with an existing tag
+#   to rebuild that release, e.g. after adding signing secrets.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and publish, e.g. v0.3.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      HAS_CERT: ${{ secrets.MACOS_CERTIFICATE != '' }}
+      HAS_NOTARY_KEY: ${{ secrets.NOTARY_KEY != '' }}
+      HAS_NOTARY_APPLEID: ${{ secrets.APPLE_APP_PASSWORD != '' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Work out version
+        id: meta
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG=""
+          fi
+          if [[ -n "$TAG" ]]; then
+            VERSION="${TAG#v}"
+            RELEASE=true
+          else
+            VERSION="0.0.0-dev.${GITHUB_SHA::7}"
+            RELEASE=false
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION (release: $RELEASE)"
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun swift --version
+
+      - name: Import Developer ID certificate
+        if: env.HAS_CERT == 'true'
+        id: cert
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PWD="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PWD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)"/\1/')"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "::error::No 'Developer ID Application' identity found in MACOS_CERTIFICATE"
+            exit 1
+          fi
+          echo "Signing as: $IDENTITY"
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          UNIVERSAL: "1"
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          SIGN_IDENTITY: ${{ steps.cert.outputs.identity || '-' }}
+        run: ./build.sh
+
+      - name: Notarize and staple
+        if: env.HAS_CERT == 'true' && (env.HAS_NOTARY_KEY == 'true' || env.HAS_NOTARY_APPLEID == 'true')
+        env:
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent build/VaultWatch.app "$RUNNER_TEMP/notarize.zip"
+          if [[ "$HAS_NOTARY_KEY" == "true" ]]; then
+            # Accept the .p8 either raw or base64-encoded.
+            if [[ "$NOTARY_KEY" == *"BEGIN PRIVATE KEY"* ]]; then
+              printf '%s' "$NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
+            else
+              echo "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+            fi
+            xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+              --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+              --wait --timeout 20m
+            rm -f "$RUNNER_TEMP/notary.p8"
+          else
+            xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+              --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+              --wait --timeout 20m
+          fi
+          xcrun stapler staple build/VaultWatch.app
+          xcrun stapler validate build/VaultWatch.app
+          spctl --assess --type execute --verbose=2 build/VaultWatch.app
+          echo "NOTARIZED=true" >> "$GITHUB_ENV"
+
+      - name: Package
+        id: pkg
+        run: |
+          ZIP="VaultWatch-${{ steps.meta.outputs.version }}.zip"
+          ditto -c -k --keepParent build/VaultWatch.app "$ZIP"
+          shasum -a 256 "$ZIP" | tee "$ZIP.sha256"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VaultWatch-${{ steps.meta.outputs.version }}
+          path: |
+            ${{ steps.pkg.outputs.zip }}
+            ${{ steps.pkg.outputs.zip }}.sha256
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: steps.meta.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          ZIP: ${{ steps.pkg.outputs.zip }}
+        run: |
+          NOTES="$RUNNER_TEMP/notes.md"
+          if [[ -f "docs/releases/$TAG.md" ]]; then
+            cat "docs/releases/$TAG.md" > "$NOTES"
+          else
+            echo "VaultWatch $VERSION" > "$NOTES"
+          fi
+          {
+            echo
+            echo "## Install"
+            echo
+            echo "1. Download **$ZIP** below and unzip it."
+            echo "2. Drag **VaultWatch.app** to **Applications** and open it."
+            if [[ "${NOTARIZED:-false}" == "true" ]]; then
+              echo
+              echo "This build is signed with a Developer ID and notarized by Apple, so it opens normally."
+            else
+              echo "3. macOS will block the first launch because this build isn't notarized yet."
+              echo "   Open **System Settings → Privacy & Security** and click **Open Anyway** next to VaultWatch."
+            fi
+            echo
+            echo "Requires macOS 13+, Node.js 22+, and the Obsidian Headless CLI (\`npm install -g obsidian-headless\`)."
+            echo
+            echo "SHA-256: \`$(cut -d' ' -f1 "$ZIP.sha256")\`"
+          } >> "$NOTES"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "VaultWatch $VERSION" --notes-file "$NOTES"
+            gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
+          else
+            gh release create "$TAG" "$ZIP" "$ZIP.sha256" --title "VaultWatch $VERSION" --notes-file "$NOTES" --verify-tag
+          fi
+
+      - name: Clean up keychain
+        if: always() && env.HAS_CERT == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true

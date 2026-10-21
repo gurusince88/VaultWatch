@@ -70,7 +70,7 @@ The first build takes 1–3 minutes.
 
 ### Releasing
 
-Push a tag like `v0.4.0` and the [Build & Release workflow](.github/workflows/build.yml) builds a universal app and publishes it. Release notes come from `docs/releases/<tag>.md`. With these repository secrets set, the app is also signed with your Developer ID and notarized:
+Bump the `VERSION` file (e.g. `0.4.0`), add notes in `docs/releases/v0.4.0.md`, and push to `main`. The [Build & Release workflow](.github/workflows/build.yml) builds a universal app, creates the `v0.4.0` tag, and publishes the release. Pushing a `v*` tag yourself works too. With these repository secrets set, the app is also signed with your Developer ID and notarized:
 
 | Secret | Value |
 |---|---|

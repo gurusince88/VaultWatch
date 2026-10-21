@@ -1,8 +1,10 @@
 name: Build & Release
 
 # - Every push / PR to main: build check on macOS.
-# - Push a tag like v0.3.0: build a universal app, sign + notarize it if the
-#   signing secrets are set, and publish it as a GitHub Release.
+# - Release: bump the VERSION file on main (e.g. 0.4.0). If tag v0.4.0 doesn't
+#   exist yet, the workflow builds a universal app, signs + notarizes it when the
+#   signing secrets are set, creates the tag, and publishes a GitHub Release.
+#   Pushing a tag like v0.4.0 yourself works too.
 # - Run manually (Actions > Build & Release > Run workflow) with an existing tag
 #   to rebuild that release, e.g. after adding signing secrets.
 
@@ -38,6 +40,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0   # need tags to tell whether VERSION is already released
 
       - name: Work out version
         id: meta
@@ -46,6 +49,14 @@ jobs:
             TAG="${{ inputs.tag }}"
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" && -f VERSION ]]; then
+            # Release on a VERSION bump: only if that version has no tag yet.
+            CANDIDATE="v$(tr -d '[:space:]' < VERSION)"
+            if git rev-parse -q --verify "refs/tags/$CANDIDATE" >/dev/null; then
+              TAG=""
+            else
+              TAG="$CANDIDATE"
+            fi
           else
             TAG=""
           fi
@@ -186,7 +197,9 @@ jobs:
             gh release edit "$TAG" --title "VaultWatch $VERSION" --notes-file "$NOTES"
             gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
           else
-            gh release create "$TAG" "$ZIP" "$ZIP.sha256" --title "VaultWatch $VERSION" --notes-file "$NOTES" --verify-tag
+            # Creates the tag at this commit if it doesn't exist yet (VERSION-bump releases).
+            gh release create "$TAG" "$ZIP" "$ZIP.sha256" --title "VaultWatch $VERSION" \
+              --notes-file "$NOTES" --target "$GITHUB_SHA"
           fi
 
       - name: Clean up keychain

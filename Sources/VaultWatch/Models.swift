@@ -37,6 +37,20 @@ struct AppSettings: Codable, Equatable {
     var vaults: [VaultConfig] = []
     /// After this many consecutive failed starts the supervisor stops retrying and notifies.
     var maxConsecutiveFailures: Int = 5
+    /// Vault paths the user removed; auto-detect must not re-add them.
+    var ignoredPaths: [String] = []
+
+    init(vaults: [VaultConfig] = []) { self.vaults = vaults }
+
+    // Tolerant decoding so configs written by older versions still load.
+    enum CodingKeys: String, CodingKey { case vaults, maxConsecutiveFailures, ignoredPaths }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        vaults = try c.decodeIfPresent([VaultConfig].self, forKey: .vaults) ?? []
+        maxConsecutiveFailures = try c.decodeIfPresent(Int.self, forKey: .maxConsecutiveFailures) ?? 5
+        ignoredPaths = try c.decodeIfPresent([String].self, forKey: .ignoredPaths) ?? []
+    }
 }
 
 enum SyncPhase: String {

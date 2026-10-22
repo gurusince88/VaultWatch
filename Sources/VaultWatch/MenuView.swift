@@ -31,9 +31,9 @@ struct MenuView: View {
             if model.settings.vaults.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("No vaults yet.").font(.subheadline.weight(.semibold))
-                    Text("Import the vaults you set up with `ob sync-setup`, or add a folder.")
+                    Text("VaultWatch finds vaults from `ob`, Obsidian, and iCloud automatically. You can also add a folder.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("Import from ob") { model.importConfiguredVaults() }
+                    Button("Detect Vaults") { model.detectVaults() }
                 }
             }
 
@@ -61,7 +61,8 @@ struct MenuView: View {
                     Button("Pause All") { model.pauseAll() }
                     Button("Resume All") { model.resumeAll() }
                     Divider()
-                    Button("Import Vaults from ob") { model.importConfiguredVaults() }
+                    Toggle("Auto-Detect New Vaults", isOn: $model.autoDetect)
+                    Button("Detect Vaults Now") { model.detectVaults() }
                     Button("Log In to Obsidian (Terminal)…") { model.loginInTerminal() }
                     Divider()
                     Button("Open Logs Folder") { NSWorkspace.shared.open(VaultLogger.directory) }

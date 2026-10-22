@@ -26,7 +26,7 @@ VaultWatch runs `ob sync --path <vault> --continuous` for each of your vaults, k
 - **Keeps sync alive**: restarts `ob` if it crashes (2s → 5s → 15s → 60s → 120s backoff), stops and notifies after 5 failures in a row.
 - **Safe shutdown**: stops `ob` with SIGTERM on quit, logout, and sleep, and restarts it after wake.
 - **One sync per vault**: refuses to start a second `ob sync` on the same vault, and offers **Take Over** if one is already running in Terminal.
-- **Finds your vaults**: on first launch, imports every vault you've set up with `ob sync-setup`.
+- **Finds your vaults automatically**: scans `ob sync-list-local`, Obsidian's own vault registry, and the iCloud Obsidian folder — at launch and every 5 minutes. Vaults already set up with `ob sync-setup` start syncing right away; the rest appear in the menu ready to set up. Removed vaults stay removed, and you can turn auto-detect off in the gear menu.
 - **Continuous or interval**: `--continuous` watching, or a sync every 1–60 minutes.
 - **Logs**: per-vault log files in `~/Library/Logs/VaultWatch/` (rotated at 5 MB) plus a live log window.
 - **Launch at Login** toggle.
@@ -97,6 +97,7 @@ Instead of the API key you can use `APPLE_ID`, `APPLE_APP_PASSWORD` (an app-spec
 | Piece | What it does |
 |---|---|
 | `BinaryResolver` | Finds `ob` and `node` (Homebrew, nvm, fnm, Volta, or your login shell), since GUI apps don't get your shell `PATH` |
+| `VaultDiscovery` | Finds vaults from `ob sync-list-local`, `~/Library/Application Support/obsidian/obsidian.json`, and the iCloud Obsidian folder, deduped by path |
 | `VaultSupervisor` | One per vault: preflight with `ob sync-status`, spawn, restart with backoff, SIGTERM shutdown, duplicate guard, parses output |
 | `SyncEventParser` | Turns `ob` lines like `Upload complete Notes/today.md` into activity events |
 | `ActivityStore` | Keeps the last 1,000 events; rebuilds history from the log files on launch |

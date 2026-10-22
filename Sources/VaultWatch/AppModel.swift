@@ -18,59 +18,106 @@ final class AppModel: ObservableObject {
     private var userPaused = Set<UUID>()
     private var sleptVaults = Set<UUID>()
     private var historyLoaded = Set<UUID>()
+    private var detectTimer: Timer?
 
     private init() {
         let bins = BinaryResolver.resolve()
         let loaded = ConfigStore.load()
-        // First launch: pick up every vault already configured with `ob sync-setup`.
-        let initial = loaded ?? AppSettings(vaults: AppModel.discoverVaults(bins))
-        settings = initial
+        settings = loaded ?? AppSettings()
         binaries = bins
-        if loaded == nil { ConfigStore.save(initial) }
+
+        // First launch: auto-detect every vault on this Mac. Sync-configured ones
+        // start right away (via startAll below); the rest appear stopped until
+        // the user sets them up.
+        if loaded == nil {
+            settings.vaults = VaultDiscovery.discover(bins).map { d in
+                var v = VaultConfig(name: d.name, path: d.path)
+                v.enabled = d.syncConfigured
+                return v
+            }
+            ConfigStore.save(settings)
+        }
 
         Notifier.requestAuthorization()
         rebuildAll()
         observeSystemEvents()
         startAll()
+        scheduleAutoDetect()
     }
 
-    /// Vaults configured locally for Headless Sync (`ob sync-list-local --json`).
-    static func discoverVaults(_ binaries: ResolvedBinaries?) -> [VaultConfig] {
-        guard let b = binaries else { return [] }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: b.ob)
-        p.arguments = ["sync-list-local", "--json"]
-        p.environment = b.environment
-        p.standardInput = FileHandle.nullDevice
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return [] }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+    // MARK: - Vault auto-detection
 
-        struct Listing: Decodable {
-            struct Vault: Decodable { let id: String?; let path: String }
-            let vaults: [Vault]
-        }
-        guard let listing = try? JSONDecoder().decode(Listing.self, from: data) else { return [] }
-        return listing.vaults.map {
-            VaultConfig(name: URL(fileURLWithPath: $0.path).lastPathComponent, path: $0.path)
+    /// Re-scan for new vaults in the background. Default on; gear menu toggle.
+    @Published var autoDetect: Bool = UserDefaults.standard.object(forKey: "autoDetectVaults") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(autoDetect, forKey: "autoDetectVaults")
+            scheduleAutoDetect()
         }
     }
 
-    /// Adds any `ob`-configured vaults that aren't in the list yet. Returns how many were added.
-    @discardableResult
-    func importConfiguredVaults() -> Int {
-        let known = Set(settings.vaults.map(\.path))
-        let new = Self.discoverVaults(binaries).filter { !known.contains($0.path) }
-        for v in new {
+    private func scheduleAutoDetect() {
+        detectTimer?.invalidate()
+        detectTimer = nil
+        guard autoDetect else { return }
+        // Once shortly after launch, then every 5 minutes.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            self?.detectVaults(notify: true)
+        }
+        let t = Timer(timeInterval: 300, repeats: true) { [weak self] _ in
+            self?.detectVaults(notify: true)
+        }
+        t.tolerance = 60
+        RunLoop.main.add(t, forMode: .common)
+        detectTimer = t
+    }
+
+    /// Scans off the main thread, then merges new vaults in. `notify` posts a
+    /// notification when something was found without the user asking.
+    func detectVaults(notify: Bool = false, completion: ((Int) -> Void)? = nil) {
+        let bins = binaries
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let found = VaultDiscovery.discover(bins)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let added = self.apply(discovered: found)
+                if !added.isEmpty {
+                    self.save()
+                    if notify {
+                        Notifier.post(
+                            title: "VaultWatch",
+                            body: added.count == 1
+                                ? "Detected new vault: \(added[0].name)"
+                                : "Detected \(added.count) new vaults: \(added.map(\.name).joined(separator: ", "))"
+                        )
+                    }
+                }
+                completion?(added.count)
+            }
+        }
+    }
+
+    /// Adds discovered vaults that aren't configured or ignored yet; returns the new ones.
+    /// Sync-configured vaults start right away; others wait for the user.
+    private func apply(discovered: [DiscoveredVault]) -> [VaultConfig] {
+        var known = Set(settings.vaults.map { VaultDiscovery.dedupeKey($0.path) })
+        let ignored = Set(settings.ignoredPaths.map(VaultDiscovery.dedupeKey))
+        var added: [VaultConfig] = []
+        for d in discovered {
+            let key = VaultDiscovery.dedupeKey(d.path)
+            guard !known.contains(key), !ignored.contains(key) else { continue }
+            known.insert(key)
+            var v = VaultConfig(name: d.name, path: d.path)
+            v.enabled = d.syncConfigured
             settings.vaults.append(v)
+            added.append(v)
             makeSupervisor(for: v)
-            supervisors[v.id]?.start()
+            if v.enabled {
+                supervisors[v.id]?.start()
+            } else {
+                runtimes[v.id] = VaultRuntime(phase: .stopped, detail: "detected — click Start to set up sync")
+            }
         }
-        if !new.isEmpty { save() }
-        return new.count
+        return added
     }
 
     // MARK: - Derived UI state
@@ -157,6 +204,8 @@ final class AppModel: ObservableObject {
         binaries = BinaryResolver.resolve()
         rebuildAll()
         startAll()
+        // `ob` may have just been installed, so its vault list is new too.
+        if binaries != nil { detectVaults() }
     }
 
     /// Called on quit / logout / power off. SIGTERM, wait, then SIGKILL only if needed.
@@ -198,9 +247,12 @@ final class AppModel: ObservableObject {
     // MARK: - Vault management
 
     func addVault(path: String) {
-        let url = URL(fileURLWithPath: path)
-        guard !settings.vaults.contains(where: { $0.path == url.path }) else { return }
-        let v = VaultConfig(name: url.lastPathComponent, path: url.path)
+        let clean = VaultDiscovery.normalize(path)
+        let key = VaultDiscovery.dedupeKey(clean)
+        guard !settings.vaults.contains(where: { VaultDiscovery.dedupeKey($0.path) == key }) else { return }
+        // Adding by hand overrides an earlier removal.
+        settings.ignoredPaths.removeAll { VaultDiscovery.dedupeKey($0) == key }
+        let v = VaultConfig(name: URL(fileURLWithPath: clean).lastPathComponent, path: clean)
         settings.vaults.append(v)
         save()
         makeSupervisor(for: v)
@@ -215,6 +267,13 @@ final class AppModel: ObservableObject {
         supervisors[id] = nil
         runtimes[id] = nil
         userPaused.remove(id)
+        // Remember the path so auto-detect doesn't bring it straight back.
+        if let v = settings.vaults.first(where: { $0.id == id }) {
+            let key = VaultDiscovery.dedupeKey(v.path)
+            if !settings.ignoredPaths.contains(where: { VaultDiscovery.dedupeKey($0) == key }) {
+                settings.ignoredPaths.append(VaultDiscovery.normalize(v.path))
+            }
+        }
         settings.vaults.removeAll { $0.id == id }
         save()
     }
